@@ -1,0 +1,322 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="theme-color" content="#0b0b0d">
+<title>Roulette</title>
+<style>
+  :root { --red:#e03131; }
+  * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; user-select:none; -webkit-user-select:none; }
+  html,body { margin:0; height:100%; background:#0b0b0d; overflow:hidden; touch-action:manipulation; }
+  #cv { position:fixed; inset:0; width:100%; height:100%; display:block; }
+  #flash { position:fixed; inset:0; background:#fff; opacity:0; pointer-events:none; }
+  #flash.on { animation:flash .55s ease-out; }
+  @keyframes flash { 0%{opacity:.95; background:#fff} 20%{opacity:.8; background:#ff3b30} 100%{opacity:0} }
+  body.shake { animation:shake .4s; }
+  @keyframes shake { 0%,100%{transform:translate(0)} 20%{transform:translate(-12px,6px)} 40%{transform:translate(10px,-7px)} 60%{transform:translate(-7px,4px)} 80%{transform:translate(4px,-3px)} }
+  #pips { position:fixed; left:0; right:0; bottom:max(30px,env(safe-area-inset-bottom)); display:flex; gap:14px; justify-content:center; pointer-events:none; }
+  .pip { width:16px; height:16px; border-radius:50%; border:2px solid #3a3d43; background:transparent; transition:all .25s; }
+  .pip.ok { background:#8a8f98; border-color:#8a8f98; }
+  .pip.bang { background:var(--red); border-color:var(--red); box-shadow:0 0 12px var(--red); }
+</style>
+</head>
+<body>
+<canvas id="cv"></canvas>
+<div id="pips"></div>
+<div id="flash"></div>
+
+<script>
+(function(){
+  const N = 6;
+  const cv = document.getElementById('cv');
+  const c = cv.getContext('2d');
+  const flash = document.getElementById('flash');
+  const pipsEl = document.getElementById('pips');
+
+  const pips = [];
+  for (let i = 0; i < N; i++) { const p = document.createElement('div'); p.className = 'pip'; pipsEl.appendChild(p); pips.push(p); }
+
+  // ---------- État ----------
+  let bullet, pos, over = false, locked = false;
+  let state = [];      // 'fired' | 'live' | undefined par chambre
+  let rot = 0;         // angle du barillet (degrés) : la chambre i est face au repère quand rot = i*60
+  let anim = null;
+
+  const easeOutBack = t => { const s = 1.9; t--; return t*t*((s+1)*t + s) + 1; };
+  const easeOutCubic = t => 1 - Math.pow(1 - t, 3);
+  function animateTo(target, dur, ease) { anim = { from: rot, to: target, t0: performance.now(), dur, ease }; }
+
+  function updateUI() {
+    pips.forEach((p, i) => {
+      p.className = 'pip' + (i < pos ? ' ok' : (over && i === pos ? ' bang' : ''));
+    });
+  }
+
+  function reset(spin) {
+    bullet = Math.floor(Math.random() * N);
+    pos = 0; over = false; state = [];
+    updateUI();
+    if (spin) {
+      animateTo(Math.ceil(rot / 360) * 360 + 720, 1400, easeOutCubic);
+      locked = true; sound.spin();
+      setTimeout(() => { locked = false; }, 1450);
+    }
+  }
+
+  // ---------- Dessin : barillet vu de côté, axe vertical ----------
+  const D2R = Math.PI / 180;
+  const norm = deg => ((deg % 360) + 540) % 360 - 180;     // (-180, 180]
+
+  function span(centerDeg, halfDeg) {
+    const a = centerDeg * D2R, w = halfDeg * D2R;
+    const lo = Math.max(a - w, -Math.PI/2), hi = Math.min(a + w, Math.PI/2);
+    return lo < hi ? [lo, hi, a] : null;
+  }
+
+  function draw(now) {
+    if (anim) {
+      const k = Math.min(1, (now - anim.t0) / anim.dur);
+      rot = anim.from + (anim.to - anim.from) * anim.ease(k);
+      if (k >= 1) { rot = anim.to; anim = null; }
+    }
+    const dpr = window.devicePixelRatio || 1;
+    const cw = cv.clientWidth, ch = cv.clientHeight;
+    if (cv.width !== Math.round(cw*dpr) || cv.height !== Math.round(ch*dpr)) {
+      cv.width = Math.round(cw*dpr); cv.height = Math.round(ch*dpr);
+    }
+    c.setTransform(dpr, 0, 0, dpr, 0, 0);
+    c.clearRect(0, 0, cw, ch);
+
+    // fond
+    let bg = c.createRadialGradient(cw/2, ch*0.4, 10, cw/2, ch*0.4, Math.max(cw,ch)*0.8);
+    bg.addColorStop(0, '#1b1c20'); bg.addColorStop(1, '#09090a');
+    c.fillStyle = bg; c.fillRect(0, 0, cw, ch);
+
+    const cx = cw / 2;
+    const R  = Math.min(cw * 0.44, (ch - 150) * 0.5);
+    const y0 = 46, y1 = ch - 100, L = y1 - y0;
+    const x0 = cx - R, bw = 2 * R;
+
+    // ombre portée
+    c.save();
+    c.shadowColor = 'rgba(0,0,0,.8)'; c.shadowBlur = 40; c.shadowOffsetY = 12;
+    c.fillStyle = '#000'; c.beginPath(); c.roundRect(x0, y0, bw, L, 16); c.fill();
+    c.restore();
+
+    // corps en acier bruni
+    c.save();
+    c.beginPath(); c.roundRect(x0, y0, bw, L, 16); c.clip();
+
+    let g = c.createLinearGradient(x0, 0, x0 + bw, 0);
+    g.addColorStop(0,   '#0b0c0e');
+    g.addColorStop(.14, '#2a2e35');
+    g.addColorStop(.34, '#59606a');
+    g.addColorStop(.44, '#8e949e');
+    g.addColorStop(.56, '#5b626b');
+    g.addColorStop(.82, '#23262b');
+    g.addColorStop(1,   '#090a0b');
+    c.fillStyle = g; c.fillRect(x0, y0, bw, L);
+
+    const yf0 = y0 + L*0.15, yf1 = y0 + L*0.74;       // cannelures
+    const ySlot0 = y0 + L*0.80, ySlot1 = y0 + L*0.86; // encoches d'arrêt
+
+    for (let i = 0; i < N; i++) {
+      // --- cannelures (entre les chambres) ---
+      const f = span(norm(i*60 + 30 - rot), 13);
+      if (f) {
+        const xa = cx + R*Math.sin(f[0]), xb = cx + R*Math.sin(f[1]);
+        const depth = Math.max(0, Math.cos(f[2]));
+        const gg = c.createLinearGradient(xa, 0, xb, 0);
+        gg.addColorStop(0, 'rgba(0,0,0,.55)'); gg.addColorStop(.5, 'rgba(0,0,0,.88)'); gg.addColorStop(1, 'rgba(0,0,0,.5)');
+        c.fillStyle = gg;
+        c.beginPath(); c.roundRect(xa, yf0, xb - xa, yf1 - yf0, Math.min((xb - xa)/2, 40)); c.fill();
+        c.fillStyle = 'rgba(255,255,255,' + (0.30*depth) + ')';
+        c.fillRect(xb - 1.5, yf0 + 20, 1.5, yf1 - yf0 - 40);
+        c.fillStyle = 'rgba(0,0,0,.6)';
+        c.fillRect(xa, yf0 + 20, 1.5, yf1 - yf0 - 40);
+      }
+      // --- encoches d'arrêt ---
+      const s = span(norm(i*60 + 30 - rot), 5.5);
+      if (s) {
+        const xa = cx + R*Math.sin(s[0]), xb = cx + R*Math.sin(s[1]);
+        c.fillStyle = '#050506';
+        c.beginPath(); c.roundRect(xa, ySlot0, xb - xa, ySlot1 - ySlot0, Math.min((xb - xa)/2, 8)); c.fill();
+        c.fillStyle = 'rgba(255,255,255,' + (0.25*Math.max(0, Math.cos(s[2]))) + ')';
+        c.fillRect(xa, ySlot1, xb - xa, 1.5);
+      }
+    }
+
+    // --- anneaux (arrière en haut, avant en bas) ---
+    const ringTop = y0 + L*0.10, ringBot = y1 - L*0.045;
+    c.fillStyle = 'rgba(0,0,0,.65)'; c.fillRect(x0, ringTop, bw, 3);
+    c.fillStyle = 'rgba(255,255,255,.16)'; c.fillRect(x0, ringTop + 3, bw, 1.5);
+    c.fillStyle = 'rgba(0,0,0,.65)'; c.fillRect(x0, ringBot, bw, 3);
+    c.fillStyle = 'rgba(255,255,255,.14)'; c.fillRect(x0, ringBot + 3, bw, 1.5);
+    c.fillStyle = 'rgba(0,0,0,.5)'; c.fillRect(x0, y0 + L*0.76, bw, 2);
+    c.fillStyle = 'rgba(255,255,255,.1)'; c.fillRect(x0, y0 + L*0.76 + 2, bw, 1);
+
+    // --- culots de cartouches sur la face arrière (haut) ---
+    const rimY = y0 + L*0.012, rimH = L*0.072;
+    for (let i = 0; i < N; i++) {
+      const r = span(norm(i*60 - rot), 19);
+      if (!r) continue;
+      const xa = cx + R*Math.sin(r[0]), xb = cx + R*Math.sin(r[1]);
+      const depth = Math.max(0, Math.cos(r[2]));
+      const st = state[i];
+      const rg = c.createLinearGradient(xa, 0, xb, 0);
+      if (st === 'live') {
+        rg.addColorStop(0, '#6e1414'); rg.addColorStop(.5, '#ff4d4d'); rg.addColorStop(1, '#6e1414');
+        c.shadowColor = '#ff2a2a'; c.shadowBlur = 30;
+      } else if (st === 'fired') {
+        rg.addColorStop(0, '#111214'); rg.addColorStop(.5, '#2b2d31'); rg.addColorStop(1, '#111214');
+      } else {
+        rg.addColorStop(0, '#6d4f17'); rg.addColorStop(.5, '#f0cf78'); rg.addColorStop(1, '#6d4f17');
+      }
+      c.fillStyle = rg;
+      c.beginPath(); c.roundRect(xa, rimY, xb - xa, rimH, Math.min((xb - xa)/2, 14)); c.fill();
+      c.shadowBlur = 0;
+      // amorce (petit cercle)
+      if (Math.abs(r[2]) < 70*D2R) {
+        const px = cx + R*Math.sin(r[2]);
+        const pw = Math.max(2, 11*Math.cos(r[2]));
+        c.fillStyle = st === 'fired' ? '#050506' : (st === 'live' ? '#fff' : '#b8903a');
+        c.beginPath(); c.ellipse(px, rimY + rimH/2, pw, 11, 0, 0, Math.PI*2); c.fill();
+        c.strokeStyle = 'rgba(0,0,0,.5)'; c.lineWidth = 1; c.stroke();
+      }
+      c.fillStyle = 'rgba(0,0,0,' + (0.35*(1-depth)) + ')';
+      c.beginPath(); c.roundRect(xa, rimY, xb - xa, rimH, Math.min((xb - xa)/2, 14)); c.fill();
+    }
+
+    // --- ombrage cylindrique + reflet spéculaire ---
+    g = c.createLinearGradient(x0, 0, x0 + bw, 0);
+    g.addColorStop(0, 'rgba(0,0,0,.75)'); g.addColorStop(.1, 'rgba(0,0,0,.3)');
+    g.addColorStop(.3, 'rgba(0,0,0,0)'); g.addColorStop(.7, 'rgba(0,0,0,0)');
+    g.addColorStop(.9, 'rgba(0,0,0,.35)'); g.addColorStop(1, 'rgba(0,0,0,.8)');
+    c.fillStyle = g; c.fillRect(x0, y0, bw, L);
+
+    const sx = cx - R*0.38;
+    g = c.createLinearGradient(sx - R*0.1, 0, sx + R*0.1, 0);
+    g.addColorStop(0, 'rgba(255,255,255,0)'); g.addColorStop(.5, 'rgba(255,255,255,.24)'); g.addColorStop(1, 'rgba(255,255,255,0)');
+    c.fillStyle = g; c.fillRect(sx - R*0.1, y0 + 14, R*0.2, L - 28);
+
+    // ombrage haut/bas (chanfreins)
+    g = c.createLinearGradient(0, y0, 0, y1);
+    g.addColorStop(0, 'rgba(0,0,0,.45)'); g.addColorStop(.03, 'rgba(0,0,0,0)');
+    g.addColorStop(.97, 'rgba(0,0,0,0)'); g.addColorStop(1, 'rgba(0,0,0,.6)');
+    c.fillStyle = g; c.fillRect(x0, y0, bw, L);
+    c.restore();
+
+    // contour
+    c.strokeStyle = '#000'; c.lineWidth = 2;
+    c.beginPath(); c.roundRect(x0, y0, bw, L, 16); c.stroke();
+
+    // repère de tir : flèches rouges de chaque côté + fin trait central
+    c.fillStyle = '#e03131';
+    c.beginPath(); c.moveTo(cx - 14, y0 - 4); c.lineTo(cx + 14, y0 - 4); c.lineTo(cx, y0 + 20); c.closePath(); c.fill();
+    c.fillStyle = 'rgba(224,49,49,.22)'; c.fillRect(cx - 1, y0 + 20, 2, L - 20);
+
+    requestAnimationFrame(draw);
+  }
+  if (!c.roundRect) c.roundRect = function(x,y,w,h){ this.rect(x,y,w,h); };
+  requestAnimationFrame(draw);
+
+  // ---------- Sons (synthétisés) ----------
+  let ac;
+  function ctx() {
+    if (!ac) ac = new (window.AudioContext || window.webkitAudioContext)();
+    if (ac.state === 'suspended') ac.resume();
+    return ac;
+  }
+  function noiseBuf(a, dur) {
+    const b = a.createBuffer(1, Math.floor(a.sampleRate * dur), a.sampleRate);
+    const d = b.getChannelData(0);
+    for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+    return b;
+  }
+  const sound = {
+    bang() {
+      const a = ctx(), t = a.currentTime;
+      const comp = a.createDynamicsCompressor(); comp.connect(a.destination);
+      const n = a.createBufferSource(); n.buffer = noiseBuf(a, 1.2);
+      const lp = a.createBiquadFilter(); lp.type = 'lowpass';
+      lp.frequency.setValueAtTime(9000, t); lp.frequency.exponentialRampToValueAtTime(250, t + 0.6);
+      const ng = a.createGain();
+      ng.gain.setValueAtTime(1, t); ng.gain.exponentialRampToValueAtTime(0.001, t + 0.9);
+      n.connect(lp).connect(ng).connect(comp); n.start(t);
+      const k = a.createBufferSource(); k.buffer = noiseBuf(a, 0.08);
+      const hp = a.createBiquadFilter(); hp.type = 'highpass'; hp.frequency.value = 1500;
+      const kg = a.createGain();
+      kg.gain.setValueAtTime(1, t); kg.gain.exponentialRampToValueAtTime(0.001, t + 0.07);
+      k.connect(hp).connect(kg).connect(comp); k.start(t);
+      const o = a.createOscillator(); o.type = 'sine';
+      o.frequency.setValueAtTime(170, t); o.frequency.exponentialRampToValueAtTime(35, t + 0.35);
+      const og = a.createGain();
+      og.gain.setValueAtTime(1, t); og.gain.exponentialRampToValueAtTime(0.001, t + 0.5);
+      o.connect(og).connect(comp); o.start(t); o.stop(t + 0.6);
+      const e = a.createBufferSource(); e.buffer = noiseBuf(a, 1.0);
+      const elp = a.createBiquadFilter(); elp.type = 'lowpass'; elp.frequency.value = 700;
+      const eg = a.createGain();
+      eg.gain.setValueAtTime(0.0001, t + 0.12);
+      eg.gain.exponentialRampToValueAtTime(0.35, t + 0.14);
+      eg.gain.exponentialRampToValueAtTime(0.001, t + 1.1);
+      e.connect(elp).connect(eg).connect(comp); e.start(t + 0.12);
+    },
+    click() {
+      const a = ctx(), t = a.currentTime;
+      const o = a.createOscillator(); o.type = 'square';
+      o.frequency.setValueAtTime(1800, t); o.frequency.exponentialRampToValueAtTime(600, t + 0.03);
+      const g = a.createGain();
+      g.gain.setValueAtTime(0.25, t); g.gain.exponentialRampToValueAtTime(0.001, t + 0.05);
+      o.connect(g).connect(a.destination); o.start(t); o.stop(t + 0.06);
+      const n = a.createBufferSource(); n.buffer = noiseBuf(a, 0.04);
+      const bp = a.createBiquadFilter(); bp.type = 'bandpass'; bp.frequency.value = 3000;
+      const ng = a.createGain();
+      ng.gain.setValueAtTime(0.4, t); ng.gain.exponentialRampToValueAtTime(0.001, t + 0.04);
+      n.connect(bp).connect(ng).connect(a.destination); n.start(t);
+    },
+    spin() {
+      const a = ctx(), t = a.currentTime;
+      for (let i = 0; i < 16; i++) {
+        const tt = t + i * 0.045 + i * i * 0.004;
+        const o = a.createOscillator(); o.type = 'square'; o.frequency.value = 1400 + Math.random() * 300;
+        const g = a.createGain();
+        g.gain.setValueAtTime(0.08, tt); g.gain.exponentialRampToValueAtTime(0.001, tt + 0.025);
+        o.connect(g).connect(a.destination); o.start(tt); o.stop(tt + 0.03);
+      }
+    }
+  };
+
+  // ---------- Jeu ----------
+  function pull() {
+    if (locked) return;
+    if (over) { reset(true); return; }
+
+    if (pos === bullet) {
+      over = true;
+      state[pos] = 'live';
+      sound.bang();
+      if (navigator.vibrate) navigator.vibrate([200, 60, 120]);
+      flash.classList.remove('on'); void flash.offsetWidth; flash.classList.add('on');
+      document.body.classList.remove('shake'); void document.body.offsetWidth; document.body.classList.add('shake');
+      updateUI();
+      locked = true; setTimeout(() => locked = false, 700);
+      return;
+    }
+
+    state[pos] = 'fired';
+    sound.click();
+    if (navigator.vibrate) navigator.vibrate(25);
+    pos++;
+    animateTo(rot + 60, 450, easeOutBack);
+    updateUI();
+  }
+
+  document.body.addEventListener('pointerdown', function(e){ e.preventDefault(); pull(); });
+  document.addEventListener('contextmenu', e => e.preventDefault());
+
+  reset(false);
+})();
+</script>
+</body>
+</html>
